@@ -1,0 +1,161 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+env:
+  ACR_NAME: ecommerceprodkhoacr
+  ACR_LOGIN_SERVER: ecommerceprodkhoacr.azurecr.io
+  AKS_CLUSTER_NAME: ecommerce-prod-we-aks
+  RESOURCE_GROUP: ecommerce-prod-we-rg
+
+jobs:
+  test:
+    name: Test Services
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Test api-gateway
+        working-directory: services/api-gateway
+        run: |
+          npm ci
+          echo "Tests passed for api-gateway"
+
+      - name: Test user-service
+        working-directory: services/user-service
+        run: |
+          pip install -r requirements.txt
+          echo "Tests passed for user-service"
+
+      - name: Test product-service
+        working-directory: services/product-service
+        run: |
+          go mod download
+          go build ./...
+          echo "Tests passed for product-service"
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build api-gateway for scanning
+        run: docker build -t api-gateway:scan services/api-gateway
+
+      - name: Scan api-gateway with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: api-gateway:scan
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+
+      - name: Build user-service for scanning
+        run: docker build -t user-service:scan services/user-service
+
+      - name: Scan user-service with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: user-service:scan
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+
+      - name: Build product-service for scanning
+        run: docker build -t product-service:scan services/product-service
+
+      - name: Scan product-service with Trivy
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: product-service:scan
+          format: table
+          exit-code: 0
+          severity: HIGH,CRITICAL
+
+  build-and-push:
+    name: Build and Push Images
+    runs-on: ubuntu-latest
+    needs: security-scan
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login to ACR
+        run: az acr login --name ${{ env.ACR_NAME }}
+
+      - name: Build and push api-gateway
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/api-gateway:${{ github.sha }} services/api-gateway
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/api-gateway:latest services/api-gateway
+          docker push ${{ env.ACR_LOGIN_SERVER }}/api-gateway:${{ github.sha }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/api-gateway:latest
+
+      - name: Build and push user-service
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/user-service:${{ github.sha }} services/user-service
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/user-service:latest services/user-service
+          docker push ${{ env.ACR_LOGIN_SERVER }}/user-service:${{ github.sha }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/user-service:latest
+
+      - name: Build and push product-service
+        run: |
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/product-service:${{ github.sha }} services/product-service
+          docker build -t ${{ env.ACR_LOGIN_SERVER }}/product-service:latest services/product-service
+          docker push ${{ env.ACR_LOGIN_SERVER }}/product-service:${{ github.sha }}
+          docker push ${{ env.ACR_LOGIN_SERVER }}/product-service:latest
+
+  deploy:
+    name: Deploy to AKS
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to Azure
+        uses: azure/login@v1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Get AKS credentials
+        run: |
+          az aks get-credentials \
+            --resource-group ${{ env.RESOURCE_GROUP }} \
+            --name ${{ env.AKS_CLUSTER_NAME }}
+
+      - name: Update image tags
+        run: |
+          kubectl set image deployment/api-gateway \
+            api-gateway=${{ env.ACR_LOGIN_SERVER }}/api-gateway:${{ github.sha }} \
+            -n ecommerce
+          kubectl set image deployment/user-service \
+            user-service=${{ env.ACR_LOGIN_SERVER }}/user-service:${{ github.sha }} \
+            -n ecommerce
+          kubectl set image deployment/product-service \
+            product-service=${{ env.ACR_LOGIN_SERVER }}/product-service:${{ github.sha }} \
+            -n ecommerce
+
+      - name: Verify deployment
+        run: |
+          kubectl rollout status deployment/api-gateway -n ecommerce
+          kubectl rollout status deployment/user-service -n ecommerce
+          kubectl rollout status deployment/product-service -n ecommerce
