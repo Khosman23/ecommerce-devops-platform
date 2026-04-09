@@ -57,23 +57,23 @@ Real-time metrics from the live AKS cluster showing CPU utilisation, memory usag
 
 ## Architecture
 
+```
 GitHub Repository
-│
-▼
+       │
+       ▼
 GitHub Actions (Test → Scan → Build → Deploy)
-│
-▼
+       │
+       ▼
 Azure Container Registry
-│
-▼
+       │
+       ▼
 AKS West Europe          AKS East US
-├── api-gateway           ├── api-gateway
-├── user-service          ├── user-service
-└── product-service       └── product-service
-│
-Istio Service Mesh
-ArgoCD GitOps
-Prometheus + Grafana
+  ├── api-gateway           ├── api-gateway
+  ├── user-service          ├── user-service
+  └── product-service       └── product-service
+
+Istio Service Mesh | ArgoCD GitOps | Prometheus + Grafana
+```
 
 ---
 
